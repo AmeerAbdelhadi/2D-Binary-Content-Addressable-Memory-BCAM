@@ -1,0 +1,319 @@
+#!/bin/csh -f
+
+####################################################################################
+## Copyright (c) 2014, University of British Columbia (UBC)  All rights reserved. ##
+##                                                                                ##
+## Redistribution  and  use  in  source   and  binary  forms,   with  or  without ##
+## modification,  are permitted  provided that  the following conditions are met: ##
+##   * Redistributions   of  source   code  must  retain   the   above  copyright ##
+##     notice,  this   list   of   conditions   and   the  following  disclaimer. ##
+##   * Redistributions  in  binary  form  must  reproduce  the  above   copyright ##
+##     notice, this  list  of  conditions  and the  following  disclaimer in  the ##
+##     documentation and/or  other  materials  provided  with  the  distribution. ##
+##   * Neither the name of the University of British Columbia (UBC) nor the names ##
+##     of   its   contributors  may  be  used  to  endorse  or   promote products ##
+##     derived from  this  software without  specific  prior  written permission. ##
+##                                                                                ##
+## THIS  SOFTWARE IS  PROVIDED  BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" ##
+## AND  ANY EXPRESS  OR IMPLIED WARRANTIES,  INCLUDING,  BUT NOT LIMITED TO,  THE ##
+## IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE ##
+## DISCLAIMED.  IN NO  EVENT SHALL University of British Columbia (UBC) BE LIABLE ##
+## FOR ANY DIRECT,  INDIRECT,  INCIDENTAL,  SPECIAL,  EXEMPLARY, OR CONSEQUENTIAL ##
+## DAMAGES  (INCLUDING,  BUT NOT LIMITED TO,  PROCUREMENT OF  SUBSTITUTE GOODS OR ##
+## SERVICES;  LOSS OF USE,  DATA,  OR PROFITS;  OR BUSINESS INTERRUPTION) HOWEVER ##
+## CAUSED AND ON ANY THEORY OF LIABILITY,  WHETHER IN CONTRACT, STRICT LIABILITY, ##
+## OR TORT  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE ##
+## OF  THIS SOFTWARE,  EVEN  IF  ADVISED  OF  THE  POSSIBILITY  OF  SUCH  DAMAGE. ##
+####################################################################################
+
+####################################################################################
+##                    syn: Run-in-batch synthesis flow manager                    ##
+##                                                                                ##
+##   Author: Ameer M.S. Abdelhadi (ameer@ece.ubc.ca, ameer.abdelhadi@gmail.com)   ##
+##    SRAM-based 2D BCAM; The University of British Columbia (UBC), April 2014    ##
+####################################################################################
+
+####################################################################################
+## USAGE:                                                                         ##
+##   ./syn <Architecture List> <Depth List> <Pattern Width List> \                ##
+##         <Segment Width List> <Bypassed? List> <Pipelined? List>                ##
+##                                                                                ##
+## - Use a comma delimited list; no space; can be surrounded by brackets ()[]{}<> ##
+## - CAM depth, pattern width and segment width are positive integers             ##
+## - Segments width list will be igonred for all architictures except of STR      ##
+## - Architecture is one of: REG, TRS, TRC, or STR                                ##
+##   - REG: Register-based Binary Content Addressable Memory                      ##
+##   - TRS: Transposed-RAM Binary Content Addressable Memory                      ##
+##   - TRC: Transposed-RAM Binary Content Addressable Memory                      ##
+##   - STR: Segmented Transposed-RAM Binary Content Addressable Memory            ##
+##   - Bypassed?  bypassed write to achieve match in the next cycle (Binary; 0/1) ##
+##   - Pipelined? bypassed BCAM version (Binary; 0/1)                             ##
+##                                                                                ##
+## EXAMPLES:                                                                      ##
+## ./syn STR 8192 9 8 0 0                                                         ##
+##    Synthesis an unpipelined/unbypassed STR BCAM with 8K lines, 9 bits pattern  ##
+##    width, and 8 bits segments width.                                           ##
+## ./syn REG,TRC 2048,4096 8,9,10 8 1 1                                           ##
+##    Synthesis a pipelined/bypassed reg-based/TRC BCAM with 2k or 4k lines, 8, 9 ##
+##    or 10 bits pattern. Segment width is ignored. Total of 6 CAM combinations.  ##
+##                                                                                ##
+## The following files and directories will be created after compilation:         ##
+##   - syn.res : A list of results, each run in a separate line, including:       ##
+##               frequency, resources usage, and runtime                          ##
+##   - log/    : Altera's logs and reports                                        ##
+####################################################################################
+
+# setup Altera's tools; change to your own flow if necessary 
+source /CMC/scripts/altera.13.1.csh
+source /CMC/tools/licenses/altera.csh
+setenv PATH ${QUARTUS_HOME}/../nios2eds/bin/:${QUARTUS_HOME}/../modelsim_ase/bin:${PATH}
+
+# require exactly 6 arguments
+if (${#argv} != 6) then
+    printf '\x1b[%i;3%im' 1 1
+    printf 'Error: Exactly 4 are required\n'
+    printf '\x1b[0m'
+    goto errorMessage
+endif
+
+# convert each argument list into a c-shell list (remove commas and etc.)
+set ARCHLST = (`echo ${argv[1]} | tr ",()[]{}<>" " "`)
+set CAMDLST = (`echo ${argv[2]} | tr ",()[]{}<>" " "`)
+set PATWLST = (`echo ${argv[3]} | tr ",()[]{}<>" " "`)
+set SEGWLST = (`echo ${argv[4]} | tr ",()[]{}<>" " "`)
+set BYPSLST = (`echo ${argv[5]} | tr ",()[]{}<>" " "`)
+set PIPELST = (`echo ${argv[6]} | tr ",()[]{}<>" " "`)
+
+# check arguments correctness (positive integer numbers)
+foreach ARGVAL ($CAMDLST $PATWLST $SEGWLST)
+  set ARGVALIsNumber=`echo $ARGVAL | egrep -c '^[0-9]+$'`
+  if ($ARGVALIsNumber != 1) then
+    printf '\x1b[%i;3%im' 1 1
+    printf "Error (${ARGVAL}): CAM depth, pattern width and segment width arguments should be possitive integer numbers\n"
+    printf '\x1b[0m'
+    goto errorMessage
+  endif
+end
+
+# check architicture list argument correctness
+foreach ARCHVAL ($ARCHLST)
+  if ( ($ARCHVAL != "REG") & ($ARCHVAL != "TRS") & ($ARCHVAL != "TRC") & ($ARCHVAL != "STR") ) then
+    printf '\x1b[%i;3%im' 1 1
+    printf "Error (${ARCHVAL}): Architicture list should be a list of REG, TRS, TRC, or STR\n"
+    printf '\x1b[0m'
+    goto errorMessage
+  endif
+end
+
+# check pipelining argument correctness
+foreach ARGVAL ($BYPSLST $PIPELST)
+  if ( ($ARGVAL != 0) & ($ARGVAL != 1) ) then
+    printf '\x1b[%i;3%im' 1 1
+    printf "Error (${ARGVAL}): Pipelining/bypassing arguments should be a binary; 0 or 1\n"
+    printf '\x1b[0m'
+    goto errorMessage
+  endif
+end
+
+# total different fifo designs
+@ FlowOprNum = ( (${#CAMDLST}) * (${#PATWLST}) * (${#SEGWLST}) * (${#ARCHLST}) * (${#BYPSLST})  * (${#PIPELST}))
+@ FlowOprCnt = 0
+
+printf '\x1b[%i;3%im' 7 4
+printf "= Synthesis in batch with the following parameters:\n"
+printf "= CAM Depth          : $CAMDLST\n"
+printf "= Pattern width      : $PATWLST\n"
+printf "= Segment width (STR): $SEGWLST\n"
+printf "= Pypassed?          : $BYPSLST\n"
+printf "= Pipelined?         : $PIPELST\n"
+printf "= Architicture       : $ARCHLST\n"
+printf '\x1b[0m'
+
+#print header
+set FML  = `grep " FAMILY " bcam.qsf | cut -d\"  -f2`
+set DEV  = `grep " DEVICE " bcam.qsf | cut -d" " -f4`
+set TTL1 = '                                      Fmax-MHz 0.9v     Combinational ALUT usage for logic                               LABs           I/O Pins              BRAM Bits Utiliz.             \n'
+set TTL2 = '      CAM     CAM   Seg.  Bypa- Pipe- ------------- ----------------------------------------- Route  Total  Total  ----------------- -------------- BRAM MLAB -----------------      Runtime\n'
+set TTL3 = 'Arch. Depth   Width Width ssed  lined T = 0c T= 85c Total  7-LUTs 6-LUTs 5-LUTs 4-LUTs 3-LUTs ALUTs  Reg.   ALMs   Total Logic Mem.  Tot. Clk  Ded. M20K Bits Utilized Occupied DSPs Minutes\n'
+set SEPR = '===== ======= ===== ===== ===== ===== ====== ====== ====== ====== ====== ====== ====== ====== ====== ====== ====== ===== ===== ===== ==== ==== ==== ==== ==== ======== ======== ==== =======\n'
+set FRMT = (`echo $SEPR| tr " " "\n" | perl -nle '$a= length; print "%-${a}s"' | tr "\n" " "`)
+if !(-f syn.res) then
+  printf "$FML $DEV\n\n$TTL1$TTL2$TTL3$SEPR" >! syn.res
+endif
+
+#initialize result values
+set val  = (`repeat 29 echo "N/A"`)
+
+# create log directoy
+if !(-d log) mkdir log
+
+# operate on all different RAM parameters
+foreach CURCAMD ($CAMDLST)
+  foreach CURPATW ($PATWLST)
+    foreach CURSEGW ($SEGWLST)
+      foreach CURPIPE ($PIPELST)
+        foreach CURBYPS ($BYPSLST)
+          foreach CURARCH ($ARCHLST)
+
+            @ FlowOprCnt++
+            set curRunStartTime      = `date +%T`
+            set curRunStartTimeStamp = `date +%s`
+            set RUNNAME = "${CURARCH}_${CURCAMD}x${CURPATW}-${CURSEGW}_${CURBYPS}-${CURPIPE}"
+
+            printf '\x1b[%i;3%im' 7 2
+            printf "\n== Starting Synthesis  (${FlowOprCnt}/${FlowOprNum}) @${curRunStartTime}: [CAM Depth:${CURCAMD}; Pattern Width:${CURPATW}; Segment Width:${CURSEGW}; Bypassed?: ${CURBYPS}; Pipelined?: ${CURPIPE}; Architicture:${CURARCH}]\n"
+            printf '\x1b[0m'
+
+            # create configuration file base on architectural
+            printf '// BCAM Configuration File\n'                                        >! config.vh
+            printf '// Generated by flow manager before logic synthesis\n'               >> config.vh
+            printf '`define TYPE "%s"\t// Implementation: REG, TRS, TRC, STR\n' $CURARCH >> config.vh
+            printf '`define CAMD %s\t// CAM Depth (lines) \n'                   $CURCAMD >> config.vh
+            printf '`define CAMW %s\t\t// Pattern Width (bits) \n'              $CURPATW >> config.vh
+            printf '`define SEGW %s\t\t// Segment Width\n'                      $CURSEGW >> config.vh
+            printf '`define BYPS %s\t\t// Bypassed?\n'                          $CURBYPS >> config.vh
+            printf '`define PIPE %s\t\t// Pipelined?\n'                         $CURPIPE >> config.vh
+
+            # clean previous report files before run
+            if (-d output_files) \rm -rf output_files
+
+            # clean previous values before run
+            set val  = (`repeat 29 echo "N/A"`)
+
+            # Generate priority encoders / mux tree / reduction or tree
+            \rm -f pe*.v
+            if (-e reduction_or.v) \rm -f reduction_or.v
+            if (-e mux_data2rmv.v) \rm -f mux_data2rmv.v
+            if ($CURPIPE) then
+              ./pe        $CURCAMD                   1 1 1    CASE camd
+              ./pe        `expr $CURCAMD / $CURSEGW` 1 1 2    CASE nseg
+              ./pe        $CURSEGW                   1 1 1    CASE segw
+              ./reduction $CURSEGW                 6 1 1 1    OR   or
+              ./mux       $CURSEGW $CURPATW        4 1 1 2         data2rmv
+            else
+              ./pe        $CURCAMD                   0 0 9999 CASE camd
+              ./pe        `expr $CURCAMD / $CURSEGW` 0 0 9999 CASE nseg
+              ./pe        $CURSEGW                   0 0 9999 CASE segw
+              ./reduction $CURSEGW                 6 0 0 9999 OR   or
+              ./mux       $CURSEGW $CURPATW        4 0 0 9999      data2rmv
+            endif
+
+            # run current synthesis
+            quartus_map --64bit --read_settings_files=on --write_settings_files=off bcam -c bcam  | tee log/${RUNNAME}.map.log
+            quartus_cdb --64bit --merge  bcam -c bcam                                             | tee log/${RUNNAME}.cdb.log
+            quartus_fit --64bit --read_settings_files=off --write_settings_files=off bcam -c bcam | tee log/${RUNNAME}.fit.log
+            quartus_sta --64bit bcam -c bcam                                                      | tee log/${RUNNAME}.sta.log
+
+            # calculate runtime and generate a report / per run
+            set curRunFinishTime      = `date +%T`
+            set curRunFinishTimeStamp = `date +%s`
+            @   curRunTimeDiff        = $curRunFinishTimeStamp - $curRunStartTimeStamp
+            set curRuntimeMin         = `echo "scale=2;$curRunTimeDiff/60"|bc`
+
+            # collect data
+            set val[1]  = $CURARCH
+            set val[2]  = $CURCAMD
+            set val[3]  = $CURPATW
+            set val[4]  = $CURSEGW
+            set val[5]  = $CURBYPS
+            set val[6]  = $CURPIPE
+            if (-f output_files/bcam.sta.rpt) then
+              set val[7]  = `grep -a4 "Slow 900mV 0C Model Fmax Summary"  output_files/bcam.sta.rpt | tail -1 | cut -d" " -f2 | tr -d " \n"`; 
+              set val[8]  = `grep -a4 "Slow 900mV 85C Model Fmax Summary" output_files/bcam.sta.rpt | tail -1 | cut -d" " -f2 | tr -d " \n"`
+            endif
+            if (-f output_files/bcam.fit.rpt) then
+              grep -A87 "; Fitter Resource Usage Summary" output_files/bcam.fit.rpt >! __fit_rpt__.tmp
+              set val[9]  = `grep "ALUT usage for logic"        __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[10] = `grep "7 input"                     __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[11] = `grep "6 input"                     __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[12] = `grep "5 input"                     __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[13] = `grep "4 input"                     __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[14] = `grep "<=3 input"                   __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[15] = `grep "ALUT usage for route"        __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[16] = `grep "Dedicated logic registers"   __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[17] = `grep "ALMs needed \["              __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[18] = `grep "Total LABs"                  __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[19] = `grep "Logic LABs"                  __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[20] = `grep "Memory LABs"                 __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[21] = `grep "I/O pins"                    __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[22] = `grep "Clock pins"                  __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[23] = `grep "Dedicated input"             __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[24] = `grep "M20K"                        __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[25] = `grep "MLAB"                        __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[26] = `grep "block memory bits"           __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[27] = `grep "block memory implementation" __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[28] = `grep "DSP"                         __fit_rpt__.tmp | cut -d";" -f3 | cut -d"/" -f1| tr -d ", "`
+              set val[29] = $curRuntimeMin
+              \rm -rf __fit_rpt__.tmp
+            endif
+            foreach i (`seq 29`)
+              if ( $val[$i] == "" ) set val[$i] = "N/A"
+            end
+
+            # print to report
+            printf "$FRMT\n" $val >> syn.res
+
+            # move log files into log directory
+            if (-d output_files) then
+              cd output_files
+              foreach fileName (*.rpt *.summary)
+                if (-f $fileName) mv $fileName "../log/${RUNNAME}.`echo $fileName | cut -d. -f2-`"
+              end
+              cd ../
+              \rm -rf output_files
+            endif
+
+            printf '\x1b[%i;3%im' 7 2
+            printf "== Synthesis (${FlowOprCnt}/${FlowOprNum}) Completed after ${curRuntimeMin} minutes: [CAM Depth:${CURCAMD}; Pattern Width:${CURPATW}; Segment Width:${CURSEGW}; Bypassed?: ${CURBYPS}; Pipelined?: ${CURPIPE}; Architicture:${CURARCH}]\n"
+            printf '\x1b[0m'
+
+          end
+        end
+      end
+    end
+  end
+end
+
+# clean unrequired files / after run
+foreach fileName (db/ hc_output/ incremental_db/ output_files/ bcam.asm.rpt bcam.eda.rpt bcam.merge.rpt bcam.fit.rpt bcam.flow.rpt bcam.map.rpt bcam.sta.rpt bcam.done bcam.merge.summary bcam.fit.summary bcam.fit.smsg bcam.map.summary bcam.sta.summary bcam.pin bcam.sof)
+  if (-e $fileName) \rm -rf $fileName
+end
+
+goto scriptEnd
+
+# error message
+
+errorMessage:
+printf '\x1b[%i;3%im' 1 1
+cat << EOH
+USAGE:
+  ./syn <Architecture List> <Depth List> <Pattern Width List> \
+        <Segment Width List> <Bypassed? List> <Pipelined? List>
+
+- Use a comma delimited list; no space; can be surrounded by brackets ()[]{}<>
+- CAM depth, pattern width and segment width are positive integers
+- Segments width list will be igonred for all architictures except of STR 
+- Architecture is one of: REG, TRS, TRC, or STR
+  - REG: Register-based Binary Content Addressable Memory
+  - TRS: Transposed-RAM Binary Content Addressable Memory
+  - TRC: Transposed-RAM Binary Content Addressable Memory
+  - STR: Segmented Transposed-RAM Binary Content Addressable Memory
+  - Bypassed?  bypassed write to achieve match in the next cycle (Binary; 0/1)
+  - Pipelined? bypassed BCAM version (Binary; 0/1)
+
+EXAMPLES:
+./syn STR 8192 9 8 0 0
+   Synthesis an unpipelined/unbypassed STR BCAM with 8K lines, 9 bits pattern
+   width, and 8 bits segments width.
+./syn REG,TRC 2048,4096 8,9,10 8 1 1
+   Synthesis a pipelined/bypassed reg-based/TRC BCAM with 2k or 4k lines, 8, 9
+   or 10 bits pattern. Segment width is ignored. Total of 6 CAM combinations.
+
+The following files and directories will be created after compilation:
+  - syn.res : A list of results, each run in a separate line, including:
+              frequency, resources usage, and runtime
+  - log/    : Alteras logs and reports
+EOH
+printf '\x1b[0m'
+scriptEnd:
+

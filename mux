@@ -1,0 +1,287 @@
+#!/bin/csh -f
+
+####################################################################################
+## Copyright (c) 2014, University of British Columbia (UBC)  All rights reserved. ##
+##                                                                                ##
+## Redistribution  and  use  in  source   and  binary  forms,   with  or  without ##
+## modification,  are permitted  provided that  the following conditions are met: ##
+##   * Redistributions   of  source   code  must  retain   the   above  copyright ##
+##     notice,  this   list   of   conditions   and   the  following  disclaimer. ##
+##   * Redistributions  in  binary  form  must  reproduce  the  above   copyright ##
+##     notice, this  list  of  conditions  and the  following  disclaimer in  the ##
+##     documentation and/or  other  materials  provided  with  the  distribution. ##
+##   * Neither the name of the University of British Columbia (UBC) nor the names ##
+##     of   its   contributors  may  be  used  to  endorse  or   promote products ##
+##     derived from  this  software without  specific  prior  written permission. ##
+##                                                                                ##
+## THIS  SOFTWARE IS  PROVIDED  BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" ##
+## AND  ANY EXPRESS  OR IMPLIED WARRANTIES,  INCLUDING,  BUT NOT LIMITED TO,  THE ##
+## IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE ##
+## DISCLAIMED.  IN NO  EVENT SHALL University of British Columbia (UBC) BE LIABLE ##
+## FOR ANY DIRECT,  INDIRECT,  INCIDENTAL,  SPECIAL,  EXEMPLARY, OR CONSEQUENTIAL ##
+## DAMAGES  (INCLUDING,  BUT NOT LIMITED TO,  PROCUREMENT OF  SUBSTITUTE GOODS OR ##
+## SERVICES;  LOSS OF USE,  DATA,  OR PROFITS;  OR BUSINESS INTERRUPTION) HOWEVER ##
+## CAUSED AND ON ANY THEORY OF LIABILITY,  WHETHER IN CONTRACT, STRICT LIABILITY, ##
+## OR TORT  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE ##
+## OF  THIS SOFTWARE,  EVEN  IF  ADVISED  OF  THE  POSSIBILITY  OF  SUCH  DAMAGE. ##
+####################################################################################
+
+####################################################################################
+##               mux: Wide pipelined multiplexer generator (c-shell)              ##
+##                                                                                ##
+##   Author: Ameer M.S. Abdelhadi (ameer@ece.ubc.ca, ameer.abdelhadi@gmail.com)   ##
+##    SRAM-based 2D BCAM; The University of British Columbia (UBC), April 2014    ##
+####################################################################################
+
+####################################################################################
+## USAGE:                                                                         ##
+## ./mux <mux width> <data width> <internal mux width> <register inputs?> \       ##
+##       <register outputs?> <maximum combinatorial depth> <top module suffex>    ##
+##     - mux  width & data width are positive integers                            ##
+##     - internal mux width is the width of the basic mux block used to construct ##
+##       the wide mux                                                             ##
+##     - register inputs/outputs is a binary (0/1) indicating if inputs/outputs   ##
+##       should be registerd for pipelining                                       ##
+##     - maximum combinatorial mux depth is acheived by pipelining                ##
+##     - Top module name and file will be "mux_<top module suffex>"               ##
+## EXAMPLES:                                                                      ##
+## ./mux 1024 32 4 1 1 1 cam                                                      ##
+##     - Will generate Verilog files for a 1K wide mux with 32bit data            ##
+##     - Registered inputs and outputs; maximum 4 inputs width combinatorial mux  ##
+##     - Top level name will be mux_cam and will be located in mux_cam.v          ##
+## The following files and directories will be created:                           ##
+## - mux_<suffex>.v: mux top module file                                          ##
+####################################################################################
+
+################################## ARGUMENTS CHECK #################################
+
+# require exactly 7 arguments
+if (${#argv} != 7) then
+    printf '\x1b[%i;3%im' 1 1
+    printf 'Error: Exactly 7 argument are required\n'
+    printf '\x1b[0m'
+    goto errorMessage
+endif
+
+# mux width
+# check argument correctness (positive integer number)
+if ( (`echo ${argv[1]} | egrep -c '^[0-9]+$'` != 1) || (${argv[1]} < 2) ) then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[1]}): mux width must be possitive integer number\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ MW = ${argv[1]}
+
+# data width
+# check argument correctness (positive integer number)
+if ( (`echo ${argv[2]} | egrep -c '^[0-9]+$'` != 1) ) then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[2]}): data width must be a possitive integer\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ DW = ${argv[2]}
+
+# internal mux width
+# check argument correctness (positive integer number)
+if ((`echo ${argv[3]} | egrep -c '^[0-9]+$'` != 1) || (${argv[3]} < 2) ) then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[3]}): mux maximum combinatorial width should be larger than 1\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ IW = ${argv[3]}
+
+# register inputs? (binary)
+# check argument correctness (binary 0/1)
+if ( (${argv[4]} != "0") & (${argv[4]} != "1") )then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[4]}): Register inputs? should be a binary 0/1\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ RI = ${argv[4]}
+
+# # register outputs? (binary)
+# check argument correctness (binary 0/1)
+if ( (${argv[5]} != "0") & (${argv[5]} != "1") )then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[5]}): Register outputs? should be a binary 0/1\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ RO = ${argv[5]}
+
+# maximum combinatorial mux depth
+# check argument correctness (positive integer number)
+if ((`echo ${argv[6]} | egrep -c '^[0-9]+$'` != 1) || (${argv[6]} < 1) ) then
+  printf '\x1b[%i;3%im' 1 1
+  printf "Error (${argv[6]}): mux maximum combinatorial depth must be a possitive integer\n"
+  printf '\x1b[0m'
+  goto errorMessage
+endif
+@ CD = ${argv[6]}
+
+# top module suffex
+set MS = ${argv[7]}
+
+################################## ARGUMENTS CHECK #################################
+
+
+# reserved keywords
+set REG = "always @(posedge clk, posedge rst)\n  if (rst) %s = %d'b0;\n  else     %s = %s;\n"
+
+# upper(log2(mux width))
+@ i = 2
+@ L2MW = 1
+while ($i < $MW)
+  @ i = $i * 2
+  @ L2MW++
+end
+
+# upper(log2(internal mux width))
+@ i = 2
+@ L2IW = 1
+while ($i < $IW)
+  @ i = $i * 2
+  @ L2IW++
+end
+
+# wide pipelined mux top module file
+
+printf "// mux_$MS.v: wide pipelined mux; automatically generated\n" >! mux_$MS.v
+printf "// input data is a packed ${i}x${DW} vector\n" >> mux_$MS.v
+printf "// Ameer Abedlhadi; April 2014 - University of British Columbia\n\n" >> mux_$MS.v
+printf "module mux_$MS(input clk, input rst, input [$MW*$DW-1:0] dat, input [$L2MW-1:0] sel, output [$DW-1:0] out);\n" >> mux_$MS.v
+
+if $RI then
+  printf "\n// register mux inputs\n" >> mux_$MS.v
+  printf "reg [$MW*$DW-1:0] w0;\n" >> mux_$MS.v
+  printf "reg [$L2MW-1:0] s0i;\n" >> mux_$MS.v
+  printf "$REG" w0  `expr $MW \* $DW` w0  dat >> mux_$MS.v
+  printf "$REG" s0i $L2MW             s0i sel >> mux_$MS.v
+
+else
+  printf "wire [$MW*$DW-1:0] w0 = dat;\n" >> mux_$MS.v
+  printf "wire [$L2MW-1:0] s0i = sel;\n" >> mux_$MS.v
+endif
+
+## selector padding width
+@ spw = ($L2IW - ($L2MW % $L2IW)) % $L2IW
+
+## selector width
+@ sw = $L2MW + $spw
+
+printf "\n// selector padding\n" >> mux_$MS.v
+set tmp = "s0i"; if $spw set tmp = "{$spw'b0,s0i}"; printf "wire [$sw-1:0] s0 = $tmp;\n" >> mux_$MS.v
+
+## current width
+@ cw = $MW
+
+## current stage number
+@ cs = 0
+
+while ($cw > 1)
+
+  ## padding width
+  @ pw = ($IW - ($cw % $IW)) % $IW
+
+  ## add padding width to current stage width
+  @ cw = $cw + $pw
+
+  ## next stage width = number of muxes in current stage
+  @ nw = $cw / $IW
+
+  ## next stage number
+  @ ns = $cs + 1
+
+  printf "\n//////////////\n// stage #$cs //\n//////////////\n\n" >> mux_$MS.v
+  set tmp = "w$cs"; if $pw set tmp = "{{($pw*$DW){1'b0}},w$cs}"; printf "wire [$cw*$DW-1:0] w${cs}p = $tmp; // padding input to stage $cs\n" >> mux_$MS.v
+  printf "wire [$nw*$DW-1:0] w${ns}i; // output of stage $cs (unregistered)\n" >> mux_$MS.v
+  
+  ## number of muxes in current stage
+  printf "\n// muxes for stage #$cs\n" >> mux_$MS.v
+  @ nwl = `echo -n $nw|wc -c`
+  foreach i (`awk "BEGIN { for (i=0; i<$nw; i++) print i; exit }"`)
+    printf "mux${IW}x${DW}_${MS} mux${IW}x${DW}_${MS}_${cs}_%0${nwl}d (w${cs}p[$DW*$IW*%${nwl}d +: $DW*$IW],s${cs}[$L2IW-1:0],w${ns}i[%0${nwl}d*$DW +: $DW]);\n" $i $i $i >> mux_$MS.v
+  end
+
+  ## pipelining
+  if ( !($ns % $CD) & ($nw > 1) ) then
+    printf "\n// register stage $cs\n" >> mux_$MS.v
+    printf "reg  [$nw*$DW-1:0] w${ns};\n" >> mux_$MS.v
+    printf "reg  [$sw-$L2IW-1:0] s${ns};\n" >> mux_$MS.v
+    printf "$REG" w$ns `expr $nw \* $DW` w$ns w${ns}i  >> mux_$MS.v
+    if ($nw > 1) printf "$REG" s$ns `expr $sw - $L2IW` s$ns "s${cs}[$sw-1:$L2IW]" >> mux_$MS.v
+  else
+    printf "wire [$nw*$DW-1:0] w$ns = w${ns}i; // data output of stage $cs\n" >> mux_$MS.v
+    if ($nw > 1) printf "wire [$sw-$L2IW-1:0] s$ns = s${cs}[$sw-1:$L2IW]; // selector output of stage $cs\n" >> mux_$MS.v
+  endif
+
+  ## selector width passed for next stage
+  @ sw = $sw - $L2IW
+
+  ## stage width for next stage
+  @ cw = $nw
+
+  ## stage number for next stage
+  @ cs = $ns
+
+end
+
+## register output
+if $RO then
+  printf "\n// register output\n" >> mux_$MS.v
+  printf "reg [$DW-1:0] outR;\n" >> mux_$MS.v
+  printf "$REG" outR $DW outR w$cs >> mux_$MS.v
+  printf "assign out = outR; // assign output to last stage / registered\n" >> mux_$MS.v
+else
+  printf "assign out = w$cs; // assign output to last stage\n" >> mux_$MS.v
+endif
+
+printf "\nendmodule\n" >> mux_$MS.v
+
+## basic ${IW} x ${DW} mux
+printf "\n//////////////////////\n// basic ${IW} x ${DW} mux //\n//////////////////////\n" >> mux_$MS.v
+printf "module mux${IW}x${DW}_${MS}(input [$IW*$DW-1:0] dat, input [$L2IW-1:0] sel, output [$DW-1:0] out);\n" >> mux_$MS.v
+@ DWL = `echo -n $DW|wc -c`
+foreach i (`awk "BEGIN { for (i=0; i<$DW; i++) print i; exit }"`)
+  printf "mux${IW}x1_${MS} mux${IW}x1_${MS}_%0${DWL}d ({dat[%${DWL}d+3*$DW],dat[%${DWL}d+2*$DW],dat[%${DWL}d+$DW],dat[%${DWL}d]},sel,out[%${DWL}d]); // mux slice\n" $i $i $i $i $i $i >> mux_$MS.v
+end
+printf "endmodule\n" >> mux_$MS.v
+
+## basic ${IW} x 1 mux
+printf "\n/////////////////////\n// basic ${IW} x 1 mux //\n/////////////////////\n" >> mux_$MS.v
+printf "module mux${IW}x1_${MS}(input [$IW-1:0] dat, input [$L2IW-1:0] sel, output out);\n" >> mux_$MS.v
+printf "assign out = dat[sel];\n" >> mux_$MS.v
+printf "endmodule\n" >> mux_$MS.v
+
+goto scriptEnd
+
+################################## ERROR MESSAGE ####################################
+
+errorMessage:
+printf '\x1b[%i;3%im' 1 1
+cat << EOH
+USAGE:
+./mux <mux width> <data width> <internal mux width> <register inputs?> \
+      <register outputs?> <maximum combinatorial depth> <top module suffex>
+    - mux  width & data width are positive integers
+    - internal mux width is the width of the basic mux block used to construct
+      the wide mux
+    - register inputs/outputs is a binary (0/1) indicating if inputs/outputs
+      should be registerd for pipelining
+    - maximum combinatorial mux depth is acheived by pipelining
+    - Top module name and file will be "mux_<top module suffex>"
+EXAMPLES:
+./mux 1024 32 4 1 1 1 cam
+    - Will generate Verilog files for a 1K wide mux with 32bit data
+    - Registered inputs and outputs; maximum 4 inputs width combinatorial mux
+    - Top level name will be mux_cam and will be located in mux_cam.v
+The following files and directories will be created:
+- mux_<suffex>.v: mux top module file
+EOH
+printf '\x1b[0m'
+scriptEnd:
+
