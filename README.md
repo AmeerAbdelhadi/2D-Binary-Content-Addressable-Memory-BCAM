@@ -13,7 +13,8 @@ A fully parameterized and generic Verilog implementation of the suggested modula
 Please refer to the full paper for more information:
 
 **A. M.S. Abdelhadi and G. G.F. Lemieux, "Deep and Narrow Binary Content-Addressable Memories using FPGA-based BRAMs," International Conference on Field-Programmable Technology (FPT), December, 2014.**
-http://www.ece.ubc.ca/~lemieux/publications/abdelhadi-fpt2014.pdf
+* **DOI:** http://dx.doi.org/10.1109/FPT.2014.7082808
+* **Paper** https://www.ece.mcmaster.ca/~ameer/publications/Abdelhadi-Conference-2014Dec-FPT2014-DeepandNarrowBCAMs-full.pdf
 
 
 ---
